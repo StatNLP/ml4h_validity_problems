@@ -1,0 +1,441 @@
+---
+title: "Sepis-3 Example"
+author: 
+  - anonymous
+  
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+
+output:
+  pdf_document:
+    latex_engine: xelatex
+  bookdown::pdf_book: default
+    
+urlcolor: blue
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      cache.lazy = FALSE,
+                      dev = c("png"),
+                      dpi = 300,
+                      fig.path = 'figures/',
+                      fig.keep = "high")
+
+#added from: https://github.com/yihui/knitr-examples/blob/master/077-wrap-output.Rmd
+library(knitr)
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+
+```
+
+
+
+
+```{r, include=FALSE}
+library(tidyverse) # A collection of packages for data science. More about it on 
+                   # www.tidyverse.com
+library(magrittr)  # A package that provides pipe operators like %>%
+library(mgcv)      # A package written by Simon Wood that implements his 
+                   # (spline based) GAM specification.
+library(glue)      # A package that provides interpolated string functions.
+library(corrplot)
+library(cowplot)
+```
+
+
+```{r function: powerSet, include=FALSE}
+#When you want to reproduce the examples, you have to run this code chunk in advance!!
+powerSet <- function(set) {
+  
+    apply(X      = rep(list(c(T,F)), length = length(set)) %>% expand.grid(.),
+          MARGIN = 1,
+          FUN    = function(...) set[...])
+}
+```
+
+
+```{r function: to add spline term for nuneric variables, include=FALSE}
+add_spline <- function(data, varlist){
+  sapply(varlist, function(x) if (is.factor(data[[x]])){x}else{paste0("s(", x,")")})
+}
+```
+
+
+
+```{r read data sets, include=FALSE}
+train_data <- 
+  read_tsv("data/train_nostd.tsv") %>%
+  rename(target = sepsis3) %>%
+  mutate(suspected_infection  = factor(suspected_infection , levels = 0:1, labels = c("non-infected", "infected")), 
+         sofa24_cat = factor(sofa_24h > 1, levels = c(FALSE, TRUE), labels = c("<2", "\u22652")),
+         target     = as.numeric(suspected_infection == "infected" & sofa24_cat == "\u22652"))
+```
+
+Train set size: `r nrow(train_data)` measurement points.
+
+
+
+\newpage
+## SEARCH
+```{r feature list for search based on corr, include=FALSE}
+#Hiko's selection
+selected_features <- c("leukocytes" , "cardiac_output", "sodium", "crp", "sofa_24h", "suspected_infection")
+
+
+feature_list <- add_spline(data = train_data, varlist = selected_features) 
+```
+
+
+
+```{r liver_model_search, cache=TRUE, include=FALSE}
+fitted_models <-
+  #generate the power set of feature_list, and remove the void set 
+  powerSet(feature_list)[-(2^length(feature_list))] %>%
+  #build the symbolic model description  
+  sapply(., function(...) glue("target~{glue_collapse(..., sep='+')}")) %>%
+  #fit the models to data, and extract key statistics
+  tibble(formula_str = .,
+         models      = lapply(X = .,
+                              FUN  = function(m_str,...) gam(as.formula(m_str), ...),
+                              data = train_data),
+         data_fit    = round(sapply(models, function(m) summary(m)$dev.expl) * 100),
+         complexity  = sapply(models, function(...) attr(logLik(...), 'df'))) %>%
+  #Sort the models so that we can find models that replicate the data well.
+  #For this models data_fit should be approximately 100.
+  arrange(desc(data_fit), complexity)
+```
+
+### TOP TEN 
+```{r hit list, echo=FALSE}
+head(fitted_models[,-2], n = 10)
+```
+
+
+### (tuned) SELECTED MODEL
+```{r tuned circular candidate, include=FALSE, cache=TRUE}
+selected_model <- gam(target  ~ s(sofa_24h) + suspected_infection, data = train_data)
+
+summary(selected_model)
+```
+
+
+\newpage
+```{r sepsis3_circ_fig2, echo = FALSE, warning= FALSE, fig.height = 3.9, fig.width = 8.3, fig.align = "center"}
+jump_sofa24 <- function(x) as.numeric(x >= 2)
+jump_suspinf  <- function(x) as.numeric(x >= .5)
+
+pseudoSmoother <- function(x, model = selected_model) {
+  coef(model)[round(x) + 1] - sign(coef(model)[1]) * coef(model)[1]
+}
+
+par(mfrow = c(1,2), mar=c(4,3,2,1), oma = c(1,1,1,1))
+plot(selected_model, 
+     se     = FALSE, 
+     scale  = 0, 
+     rug    = FALSE, 
+     xlim   = c(0,14), 
+     ylim   = c(0, 1), 
+     select = 1, 
+     ylab   = "Smoother Value", 
+     xlab   = "SOFA-24h",
+     yaxt = "n")
+axis(2, at = 0:1, labels = 0:1)
+curve(jump_sofa24, 
+      from = 0, 
+      to   = 14, 
+      n    = 1001, 
+      add  = TRUE, 
+      col  = "blue", 
+      lty  = "dashed")
+legend(legend = c("Condition", "Reconstructed"), 
+       col    = c("blue", "black"),
+       lty    = c("dashed", "solid"),
+       bty    = "o",
+       bg     = "white",
+       x      = "topright")
+#rug(unique(train_data$urine24))
+
+plot.function(pseudoSmoother, 
+      from = -.49, 
+      to   = 1.49, 
+      n    = 1001, 
+      lty  = "solid",
+      xlim = c(-.49, 1.49),
+      ylim = c(0,1),
+      xaxt = "n",
+      yaxt = "n",
+      #main = glue("Selected Model (D\U00B2={summary(selected_model)$dev.expl}%)"),
+      ylab = "", 
+      xlab = "Suspected Infection")
+    axis(1, at = 0:1, labels = c("non-infected", "infected"))
+    axis(2, at = 0:1, labels = 0:1)
+curve(jump_suspinf, 
+      from = -.49, 
+      to   = 1.49,  
+      n    = 1001, 
+      add  = TRUE, 
+      col  = "blue", 
+      lty  = "dashed")
+legend(legend = c("Condition", "Reconstructed"), 
+       col    = c("blue", "black"),
+       lty    = c("dashed", "solid"),
+       bty    = "o",
+       bg     = "white",
+       x      = "topleft")
+#rug(unique(train_data$crea))
+par(mfrow = c(1,1), mar = c(5, 4, 4, 2))
+```
+
+\newpage
+### Circular Feature Correlation
+
+
+```{r}
+xtabs(~ target + sofa24_cat + suspected_infection, data =train_data)
+```
+
+
+\newpage
+## NULLIFICATION
+```{r, include = FALSE, cache=TRUE}
+gam_nocirc <- 
+  gam(target ~ s(sofa_24h) + s(leukocytes) + s(cardiac_output) + s(sodium) + s(crp), 
+      data = train_data)
+
+gam_all <- 
+  gam(target~ suspected_infection + s(sofa_24h) + s(leukocytes) + s(cardiac_output) + s(sodium) + s(crp), 
+      data = train_data)
+```
+
+
+
+```{r sepsis3_circ_fig4, echo=FALSE, warning=FALSE, fig.height = 11.7, fig.width = 8.3, fig.align = "center"}
+jump_sofa24 <- function(x) as.numeric(x >= 2)
+jump_suspinf  <- function(x) as.numeric(x >= .5)
+
+pseudoSmoother <- function(x, model = gam_all) {
+  coef(model)[round(x) + 1] - sign(coef(model)[1]) * coef(model)[1]
+}
+
+dev_nocirc   <- floor(summary(gam_nocirc)$dev.expl * 100)
+dev_withcirc <- floor(summary(gam_all)$dev.expl * 100)
+
+par(mfrow = c(6,2),  mar=c(2,3,2,3), oma = c(1,1,1,1))
+
+
+#first row: suspinf
+  plot(x = seq(.15, 5.2, by = .01), y = seq(0, 4, length.out=506),
+       main   = glue("GAM without Suspected Infection (D\u00B2={dev_nocirc}%)"),
+       xlim   = c(-0.49, 1.49), 
+       ylim   = c(0, 1), 
+       yaxt   = "n",
+       xaxt   = "n",
+       ylab   = "",
+       xlab   = "", 
+       type   = "n")
+  text(labels = "not included in GAM",
+       x      = mean(c(-.49,1.49)),
+       y      = mean(c(0,1)),
+       adj    = .5)
+  axis(1, at = 0:1, labels = c("non-infected", "infected"))
+  axis(2, at = 0:1, labels = 0:1)
+  
+plot.function(pseudoSmoother, 
+      main   = glue("GAM with Suspected Infection (D\u00B2={dev_withcirc}%)"),     
+      from = -.49, 
+      to   = 1.49, 
+      n    = 1001, 
+      lty  = "solid",
+      xlim = c(-.49, 1.49),
+      ylim = c(0,1),
+      xaxt = "n",
+      yaxt = "n",
+      ylab = "", 
+      xlab = "")
+    axis(1, at = 0:1, labels = c("non-infected", "infected"))
+    axis(2, at = 0:1, labels = 0:1)
+curve(jump_suspinf, 
+      from = -.49, 
+      to   = 1.49,  
+      n    = 1001, 
+      add  = TRUE, 
+      col  = "blue", 
+      lty  = "dashed")
+legend(legend = c("Condition", "Reconstructed"), 
+       col    = c("blue", "black"),
+       lty    = c("dashed", "solid"),
+       bty    = "o",
+       bg     = "white",
+       x      = "topleft")
+ mtext("Suspected Infection", side = 4, line = 1)
+
+
+#second row: sofa24
+  plot(gam_nocirc, 
+     se     = FALSE,
+     #trans  = plogis,
+     #scale  = 0, 
+     rug    = FALSE, 
+     xlim   = c(0,14), 
+     ylim   = c(0, 1),
+     select = 1, 
+     ylab   = "", 
+     xlab   = "",
+     yaxt = "n")
+axis(2, at = 0:1, labels = 0:1)
+
+  plot(gam_all, 
+     se     = FALSE,
+     #trans  = plogis,
+     #scale  = 0, 
+     rug    = FALSE, 
+     xlim   = c(0,14), 
+     ylim   = c(0, 1),
+     select = 1, 
+     ylab   = "", 
+     xlab   = "",
+     yaxt = "n")
+axis(2, at = 0:1, labels = 0:1)
+curve(jump_sofa24, 
+      from = 0, 
+      to   = 14, 
+      n    = 1001, 
+      add  = TRUE, 
+      col  = "blue", 
+      lty  = "dashed")
+legend(legend = c("Condition", "Reconstructed"), 
+       col    = c("blue", "black"),
+       lty    = c("dashed", "solid"),
+       bty    = "o",
+       bg     = "white",
+       x      = "topright")
+mtext("SOFA-24h", side = 4, line = 1)
+
+  
+# third row: leuko
+  plot(gam_nocirc, 
+       se     = FALSE,
+       #trans  = plogis,
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "", 
+       xlab   = "", 
+       ylim   = c(-.1,1), 
+       xlim   = c(0,55), 
+       select = 2)
+    abline(h=0, lty = 3)
+    axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$leuko))
+     
+  plot(gam_all,
+       se     = FALSE, 
+       #trans  = plogis,
+       #rug    = TRUE, 
+       yaxt   = "n",
+       ylab   = "", 
+       xlab   = "", 
+       ylim   = c(-.1,1),
+       xlim   = c(0,55),
+       select = 2)
+    abline(h=0, lty = 3)
+  axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$leuko))
+  mtext("Leucocytes", side = 4, line = 1)
+
+# fourth row: htv
+  plot(gam_nocirc, 
+       se     = FALSE,
+       #trans  = plogis,
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-.1,1),
+       xlim   = c(0, 21),
+       select = 3)
+    abline(h=0, lty = 3)
+    axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$htv))
+    
+  plot(gam_all,
+       se     = FALSE,
+       #trans  = plogis,
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "b",
+       ylim   = c(-.1,1),
+       xlim   = c(0, 21),
+       select = 3)
+    abline(h=0, lty = 3)
+    rug(unique(train_data$htv))
+    axis(2, at = 0:1, labels = 0:1)
+  mtext("Cardiac Output", side = 4, line = 1)
+
+#fith row: natrium
+  plot(gam_nocirc,
+       se     = FALSE,
+       #trans  = plogis,
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-.1,1),
+       xlim   = c(105, 180),
+       select = 4)
+    abline(h = 0, lty = 3)
+    axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$natrium))
+    
+  plot(gam_all,
+       se     = FALSE,
+       #trans  = plogis,
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-.1,1),
+       xlim   = c(105, 180),
+       select = 4)
+    abline(h = 0, lty = 3)
+     axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$natrium))
+  mtext("Sodium", side = 4, line = 1)
+
+#sixth row: crp
+  plot(gam_nocirc,
+       se     = FALSE,
+       #trans  = plogis,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-.1,1),
+       xlim   = c(0, 550),
+       select = 5)
+    abline(h=0, lty = 3)
+    axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$crp))
+  plot(gam_all,
+       se     = FALSE,
+       #trans = plogis,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-.1,1),
+       xlim   = c(0, 550),
+       select = 5)
+    abline(h=0, lty = 3)
+     axis(2, at = 0:1, labels = 0:1)
+    rug(unique(train_data$crp))
+  mtext("CRP", side = 4, line = 1)
+par(mfrow = c(1,1), mar = c(5,4,4,2))
+```

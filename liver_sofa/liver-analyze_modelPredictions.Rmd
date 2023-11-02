@@ -1,0 +1,815 @@
+---
+title: "Model Distillation: Liver SOFA Example"
+author: 
+  - anonymous
+  
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+
+output:
+  pdf_document:
+    latex_engine: xelatex
+  bookdown::pdf_book: default
+    
+urlcolor: blue
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      cache.lazy = FALSE,
+                      dev = c("png"),
+                      dpi = 300,
+                      fig.path = 'figures/',
+                      fig.keep = "high")
+
+#added from: https://github.com/yihui/knitr-examples/blob/master/077-wrap-output.Rmd
+library(knitr)
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+
+```
+
+
+
+
+```{r, message=FALSE}
+library(tidyverse) # A collection of packages for data science. More about it on 
+                   # www.tidyverse.com
+library(magrittr)  # A package that provides pipe operators like %>%
+library(mgcv)      # A package written by Simon Wood that implements his 
+                   # (spline based) GAM specification.
+library(glue)      # A package that provides interpolated string functions.
+```
+
+
+```{r function: powerSet, include=FALSE}
+#When you want to reproduce the examples, you have to run this code chunk in advance!!
+powerSet <- function(set) {
+  
+    apply(X      = rep(list(c(T,F)), length = length(set)) %>% expand.grid(.),
+          MARGIN = 1,
+          FUN    = function(...) set[...])
+}
+```
+
+
+
+```{r function: Accuracy Measures for multiclass, include=FALSE}
+accuracy <- 
+  function(y, y_hat, filter = TRUE) mean((y == y_hat)[filter])
+
+class_accuracy <-
+  function(y, y_hat, classes = sort(unique(y))) 
+    sapply(as.character(classes), function(c) accuracy(y, y_hat, filter = (y == as.numeric(c))))
+```
+
+
+```{r read data sets, include=FALSE}
+train_data <- readRDS("train_set_with_sofa_predictions.rds")
+
+test_data <- readRDS("test_set_with_sofa_predictions.rds")
+```
+
+
+Learner: Feed forward neural network with seven layers (number of neurons per 
+layer: 128, 161, 203 , 256, 203 , 161, 128) and relu activation function. 
+The network was trained with SGD (batch size 64) and learning rate .01 for 5 
+epochs and a dropoutrate of .2 for inter hidden layer weights. All other 
+optimizer settings are default values of pyTorch's SGD optimizer. The objective 
+function was MSE. 
+
+In a second step thresholds to turn the network output (score) 
+into class predictions were learned . For this purpose a ordinal regression model 
+was trained (R package "ordinal"). 
+
+Train set size: `r nrow(train_data)` measurement points.
+Test set size: `r nrow(test_data)` measurement points.
+
+
+\newpage
+## PERFORMANCE EVALUATION
+
+### CIRCULAR MODEL - TRAIN SET ACCURACY (overall and per class) 
+
+```{r accuracy measures on train set for circular teacher, echo=FALSE}
+with(train_data, accuracy(target, sofa_circ))
+with(train_data, class_accuracy(target, sofa_circ))
+```
+
+Confusion Matrix:
+```{r, echo=FALSE}
+xtabs(~ target + sofa_circ, data = train_data)
+```
+
+
+### CIRCULAR MODEL - TEST SET ACCURACY (overall and per class) 
+
+```{r accuracy measures on test set for circular teacher, echo=FALSE}
+acc_circ <- with(test_data, accuracy(target, sofa_circ))
+print(acc_circ)
+with(test_data, class_accuracy(target, sofa_circ))
+```
+
+Confusion Matrix:
+```{r, echo=FALSE}
+xtabs(~ target + sofa_circ, data = test_data)
+```
+
+\newpage
+### NON-CIRCULAR MODEL - TRAIN SET ACCURACY (overall and per class) 
+
+```{r accuracy measures on train set for non-circular teacher, echo=FALSE}
+with(train_data, accuracy(target, sofa_nocirc))
+with(train_data, class_accuracy(target, sofa_nocirc))
+```
+
+Confusion Matrix:
+```{r, echo=FALSE}
+xtabs(~ target + sofa_nocirc, data = train_data)
+```
+
+
+### NON-CIRCULAR MODEL - TEST SET ACCURACY (overall and per class) 
+
+```{r accuracy measures on test set for non-circular teacher, echo=FALSE}
+acc_nocirc <- with(test_data, accuracy(target, sofa_nocirc))
+print(acc_nocirc)
+with(test_data, class_accuracy(target, sofa_nocirc))
+```
+
+Confusion Matrix:
+```{r, echo=FALSE}
+xtabs(~ target + sofa_nocirc, data = test_data)
+```
+
+
+
+
+
+\newpage
+### CORRELATION PATTERN
+```{r load libraries to draw circular heatmap, include=FALSE}
+library(circlize)
+#to install package "ComplexHeatmap":
+#install.packages("BiocManager")
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+library(gridBase)
+```
+
+
+```{r calc correlations,include=FALSE}
+method <- "pearson"
+
+corr_matrix <-
+  cbind(
+    "Label"        = sapply(select(test_data, amv:horovitz), 
+                            cor,
+                            method = method,
+                            y = test_data$target),
+    "DNN w bili"     = sapply(select(test_data, amv:horovitz), 
+                            cor,
+                            method = method,
+                            y = test_data$sofa_circ),
+    "DNN wo bili" = sapply(select(test_data, amv:horovitz), 
+                            cor,
+                            method = method,
+                            y = test_data$sofa_nocirc))
+```
+
+
+
+```{r liver_distill_fig1 , fig.height = 4.5, fig.width = 5.5, fig.align = "center", warning=FALSE, message=FALSE, echo=FALSE}
+
+plot.new()
+circle_size = unit(1, "snpc") # snpc unit gives you a square region
+
+pushViewport(viewport(x = 0, 
+                      y = 0.5, 
+                      width = circle_size, 
+                      height = circle_size, 
+                      just = c("left", "center")))
+
+
+col_scale <- 
+  colorRamp2(c(-1, 0, 1), c("#67001F", "#FFFFFF", "#053061"), space ="LAB")
+
+par(omi = gridOMI(), new = TRUE)
+par(mar = c(0.1, 0.1, 0.1, 0.1))
+circos.par(gap.after = 35, cell.padding = c(0, 0, 0, 0))
+
+
+  circos.heatmap(corr_matrix[, 3, drop = FALSE], 
+                 col = col_scale, 
+                 track.height = .1,
+                 rownames.side = "outside",
+                 rownames.font = 2)
+                 #rownames.cex = 0.5 + .25 * rownames(corr_matrix) %in% vars)
+  circos.track(track.index = 2, 
+               panel.fun = function(x, y) {
+                  cn = colnames(corr_matrix)[3]
+                  n  = length(cn)
+                  circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+                              1:n - 0.5, cn, 
+                              cex = 0.75, 
+                              adj = c(0, 0.5), 
+                              facing = "bending.inside",
+                              niceFacing = TRUE,
+                              font = 2)},
+              bg.border = NA)
+  
+                
+  circos.heatmap(corr_matrix[,2 , drop = FALSE], 
+               col = col_scale, 
+               track.height = .1)
+  circos.track(track.index = 3,
+               panel.fun = function(x, y) {
+                  cn = colnames(corr_matrix)[2]
+                  n = length(cn)
+                  circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+                              1:n - 0.5, cn, 
+                              cex = 0.75, 
+                              adj = c(0, 0.5), 
+                              facing = "bending.inside",
+                              niceFacing = TRUE,
+                              font = 2)},
+              bg.border = NA)
+  
+  
+  circos.heatmap(corr_matrix[,1 , drop = FALSE], 
+               col = col_scale, 
+               track.height = .1)
+  circos.track(track.index = 4,
+               panel.fun = function(x, y) {
+                  cn = colnames(corr_matrix)[1]
+                  n = length(cn)
+                  circos.text(rep(CELL_META$cell.xlim[2], n) + convert_x(1, "mm"), 
+                              1:n - 0.5, cn, 
+                              cex = 0.75, 
+                              adj = c(0, 0.5), 
+                              facing = "bending.inside",
+                              niceFacing = TRUE,
+                              font = 2)},
+              bg.border = NA)
+  
+  circos.clear()
+
+upViewport()
+
+lgd_color <- 
+  Legend(at = seq(-1, 1, .2), 
+         col_fun = col_scale, 
+         title_position = "topcenter", 
+         title = "r",
+         border = "black")
+draw(lgd_color,  x = circle_size, just = "left")
+```
+
+
+\newpage
+## NULLIFICATION
+```{r train student gams which have access to all features, warning=FALSE, cache=TRUE, include=FALSE}
+#list_wo_bili <- 
+#  paste0(c(glue("s({names(test_data)[-c(8, 42, 45:47)]})"), 
+#           names(test_data)[42]),
+#        collapse = " + ")
+
+list_wo_bili <- 
+  corr_matrix[order(abs(corr_matrix[,"DNN wo bili"]), decreasing=TRUE),][2:5,] %>%
+  rownames(.) %>% 
+  paste0("s(", .,")") %>%
+  paste0(., collapse = " + ")
+
+student_nocirc_all <- 
+  gam(as.formula(paste0("sofa_nocirc ~ s(bili) + ", list_wo_bili)), 
+      data = test_data)
+
+student_circ_all <- 
+  gam(as.formula(paste0("sofa_circ ~ s(bili, k=100) + ", list_wo_bili)), 
+      data = test_data)
+```
+
+
+
+```{r train student gams which have access to non-circular features only, warning=FALSE, cache=TRUE, include=FALSE}
+#list_wo_bili <- 
+#  paste0(c(glue("s({names(test_data)[-c(8, 42, 45:47)]})"), 
+#           names(test_data)[42]),
+#        collapse = " + ")
+
+list_wo_bili <- 
+  corr_matrix[order(abs(corr_matrix[,"DNN wo bili"]), decreasing=TRUE),][2:5,] %>%
+  rownames(.) %>% 
+  paste0("s(", .,")") %>%
+  paste0(., collapse = " + ")
+
+student_nocirc_noBili <- 
+  gam(as.formula(paste0("sofa_nocirc ~ ", list_wo_bili)), 
+      data = test_data)
+
+student_circ_noBili <- 
+  gam(as.formula(paste0("sofa_circ ~ ",list_wo_bili)), 
+      data = test_data)
+```
+
+
+<!-- ### TEACHER: circular, STUDENT: all features -->
+```{r, echo=FALSE, include=FALSE}
+summary(student_circ_all)
+```
+
+\newpage
+<!-- ### TEACHER: circular, STUDENT: no bili -->
+```{r, echo=FALSE, include=FALSE}
+summary(student_circ_noBili)
+```
+
+\newpage
+<!-- ### TEACHER: non-circular, STUDENT: all features -->
+```{r,echo=FALSE, include=FALSE}
+summary(student_nocirc_all)
+```
+
+\newpage
+<!-- ### TEACHER: non-circular, STUDENT: no bili -->
+```{r,echo=FALSE, include=FALSE}
+summary(student_nocirc_noBili)
+```
+
+\newpage
+```{r select 5 most important featurs for non-circ model based on corr, include=FALSE, eval=FALSE}
+corr_matrix[order(abs(corr_matrix[,"circular"]), decreasing=TRUE),][1:5,]
+```
+
+```{r liver_distill_fig2, echo=FALSE, warning=FALSE, fig.height = 11.7, fig.width = 8.3, fig.align = "center"}
+dev_nobili_circ <- round(summary(student_circ_noBili)$dev.expl * 100)
+dev_all_circ <- round(summary(student_circ_all)$dev.expl * 100)
+
+dev_nobili_nocirc   <- round(summary(student_nocirc_noBili)$dev.expl * 100)
+dev_all_nocirc <- round(summary(student_nocirc_all)$dev.expl * 100)
+
+jump_bili <- function(x) (x > 12) + (x > 6) + (x > 2) + (x > 1.2) + 0
+
+par(mfrow = c(5,4),  mar=c(1,1,3,1), oma = c(1,1,2,1))
+
+
+
+#first row: bilirubin 
+ #non-circular model
+   plot(x = 0:15, y = seq(0,4, length.out=16),
+     xlim   = c(0,15), 
+     ylim   = c(0,4),
+     main   = glue("GAM w/o Bilirubin (D\U00B2={dev_nobili_nocirc}%)"),
+     ylab   = "", 
+     xlab   = "",
+     #yaxt   = "n",
+     type   = "n")
+  text(labels = "not included in student GAM",
+       x      = mean(c(0,15)),
+       y      = mean(c(0,4)),
+       adj    = .5)
+  
+  mtext(glue("Black-Box Model without Bilirubin (Acc.={floor(acc_nocirc * 100)}%)"), font = 2, side = 3, line = 0, outer = TRUE, at = .25)
+  
+  plot(student_nocirc_all, 
+     se     = FALSE, 
+     #rug   = TRUE, 
+     xlim   = c(0,15), 
+     ylim   = c(0,4),
+     main   = glue("GAM w/ Bilirubin (D\U00B2={dev_all_nocirc}%)"),
+     ylab   = "", 
+     xlab   = "",
+     yaxt   = "n", 
+     select = 1)
+   rug(unique(test_data$bili))
+    curve(jump_bili, from = 0, to = 15, n = 1001, add = TRUE, col = "blue", lty="dashed")
+   abline(v = c(1.2, 2, 6, 12), col = "blue", lty="dotted")
+   curve(jump_bili, from = 0, to = 15, n = 1001, add = TRUE, col = "blue", lty="dashed")
+   abline(v = c(1.2, 2, 6, 12), col = "blue", lty="dotted")
+   legend(legend = c("Definition", "Learned"), 
+          col    = c("blue", "black"),
+          lty    = c("dashed", "solid"),
+          bty    = "o",
+          bg     = "white",
+          x      = "topleft")
+
+  
+  
+    #circular model
+   plot(x = 0:15, y = seq(0,4, length.out=16),
+     xlim   = c(0,15), 
+     ylim   = c(0,4),
+     main   = glue("GAM w/o Bilirubin (D\U00B2={dev_nobili_circ}%)"),
+     ylab   = "", 
+     xlab   = "",
+     yaxt   = "n",
+     type   = "n")
+  text(labels = "not included in GAM",
+       x      = mean(c(0,15)),
+       y      = mean(c(0,4)),
+       adj    = .5)
+  
+  mtext(glue("Black-Box Model with Bilirubin (Acc.={floor(acc_circ*100)}%)"), font = 2, side = 3, line = 0, outer = TRUE, at = .75)
+  
+  plot(student_circ_all, 
+     se     = FALSE, 
+     #rug   = TRUE, 
+     xlim   = c(0,15), 
+     ylim   = c(0,4),
+     main   = glue("GAM w/ Bilirubin (D\U00B2={dev_all_circ}%)"),
+     ylab   = "", 
+     xlab   = "",
+     yaxt   = "n", 
+     #ann=FALSE,
+     select = 1,
+     shift  = coef(student_circ_all)[1])
+   rug(unique(test_data$bili))
+  curve(jump_bili, from = 0, to = 15, n = 1001, add = TRUE, col = "blue", lty="dashed")
+   abline(v = c(1.2, 2, 6, 12), col = "blue", lty="dotted")
+   curve(jump_bili, from = 0, to = 15, n = 1001, add = TRUE, col = "blue", lty="dashed")
+   abline(v = c(1.2, 2, 6, 12), col = "blue", lty="dotted")
+   legend(legend = c("Definition", "Learned"), 
+          col    = c("blue", "black"),
+          lty    = c("dashed", "solid"),
+          bty    = "o",
+          bg     = "white",
+          x      = "topleft")
+  mtext("Bilirubin", side = 4, line = 1)  
+  
+#second row: asat
+ #circular model    
+  plot(student_nocirc_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       #yaxt   = "n",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 550), 
+       select = 1)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$thrombo))
+  
+  plot(student_nocirc_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 550), 
+       select = 2)
+    abline(h=0, lty = 3)
+      rug(unique(test_data$thrombo))
+
+  
+ #circular model    
+  plot(student_circ_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 550), 
+       select = 1)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$thrombo))
+  
+  plot(student_circ_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 550), 
+       select = 2)
+    abline(h=0, lty = 3)
+      rug(unique(test_data$thrombo))
+  mtext("ASAT", side = 4, line = 1)
+    
+  
+#third row: hzv
+#non-circular model
+  plot(student_nocirc_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       #yaxt   = "n",
+       ylim   = c(-1,4),
+       xlim   = c(0, 18),
+       select = 2)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$hzv))
+  
+  plot(student_nocirc_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4),
+       xlim   = c(0, 18),
+       select = 3)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$hzv))
+
+  
+ #circular model
+  plot(student_circ_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-1,4),
+       xlim   = c(0, 18),
+       select = 2)
+    abline(h=0, lty = )
+    rug(unique(test_data$hzv))
+  
+  plot(student_circ_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4),
+       xlim   = c(0, 18),
+       select = 3)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$hzv))
+  mtext("Cardiac Output", side = 4, line = 1)
+  
+#forth row: alat
+  #non-circular model
+  plot(student_nocirc_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "", 
+       xlab   = "",
+       #yaxt   = "n",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 7000), 
+       select = 3)
+    rug(unique(test_data$svri))
+    abline(h=0, lty = 3)
+  
+  plot(student_nocirc_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "", 
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 7000),
+       select = 4)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$svri))
+
+  
+  
+   #circular model
+  plot(student_circ_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "", 
+       xlab   = "",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 7000), 
+       select = 3)
+    rug(unique(test_data$svri))
+    abline(h=0, lty = 3)
+  
+  plot(student_circ_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "", 
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4), 
+       xlim   = c(0, 7000),
+       select = 4)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$svri))
+  mtext("ALAT", side = 4, line = 1)
+  
+  
+#fifth row: lactat
+  #circular model
+  plot(student_nocirc_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       #yaxt   = "n",
+       ylim   = c(-1,4),
+       #xlim   = c(, ),
+       select = 4)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$urine24))
+  
+  plot(student_nocirc_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4),
+       #xlim   = c(, ),
+       select = 5)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$urine24))
+ 
+  #circular model
+  plot(student_circ_noBili, 
+       se     = FALSE, 
+       #rug    = TRUE,
+       yaxt   = "n",
+       ylab   = "",
+       xlab   = "",
+       ylim   = c(-1,4),
+       #xlim   = c(, ),
+       select = 4)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$urine24))
+  
+  plot(student_circ_all, 
+       se     = FALSE, 
+       #rug    = TRUE, 
+       ylab   = "",
+       xlab   = "",
+       yaxt   = "n",
+       ylim   = c(-1,4),
+       #xlim   = c(, ),
+       select = 5)
+    abline(h=0, lty = 3)
+    rug(unique(test_data$urine24))
+  mtext("Lactate", side = 4, line = 1)
+  
+  
+par(mfrow = c(1,1), mar = c(5,4,4,2))
+```
+
+
+
+
+\newpage
+## ABLATION STUDY I (REMOVE CIRCULAR FEATURE)
+```{r ablation data set, include=FALSE}
+ablation_data <- readRDS("ablation_set_with_sofa_predictions.rds")
+```
+
+
+### CIRCULAR MODEL
+```{r accuracy measures on train se for circular teacher, echo=FALSE}
+with(ablation_data, accuracy(target, sofa_circ))
+with(ablation_data, class_accuracy(target, sofa_circ))
+```
+
+Confusion Matrix:
+```{r, echo=FALSE}
+xtabs(~ target + sofa_circ, data = ablation_data)
+```
+
+
+
+<!-- ### NON-CIRCULAR MODEL -->
+```{r accuracy measures on train set for non-circular model, echo=FALSE, eval=FALSE}
+with(ablation_data, accuracy(target, sofa_nocirc))
+with(ablation_data, class_accuracy(target, sofa_nocirc))
+```
+
+<!-- Confusion Matrix: -->
+```{r, echo=FALSE, eval=FALSE}
+xtabs(~ target + sofa_nocirc, data = ablation_data)
+```
+
+
+
+
+
+
+\newpage
+## SEARCH: Circular Teacher
+
+```{r feature list for search based on corr with circular teacher, include=FALSE}
+feature_list <- 
+  corr_matrix[order(abs(corr_matrix[,"DNN w bili"]), decreasing=TRUE),][1:5,] %>%
+  rownames(.) %>% 
+  paste0("s(", .,")")
+
+feature_list[1] <- "s(bili, k = 100)"
+```
+
+```{r liver_model_search for circular teacher, cache=TRUE, echo=FALSE, include=FALSE}
+fitted_models <-
+  #generate the power set of feature_list, and remove the void set 
+  powerSet(feature_list)[-(2^length(feature_list))] %>%
+  #build the symbolic model description  
+  sapply(., function(...) glue("sofa_circ~{glue_collapse(..., sep='+')}")) %>%
+  #fit the models to data, and extract key statistics
+  tibble(formula_str = .,
+         models      = lapply(X = .,
+                              FUN  = function(m_str,...) bam(as.formula(m_str), ...),
+                              data = test_data),
+         data_fit    = floor(sapply(models, function(m) summary(m)$dev.expl) * 100),
+         complexity  = sapply(models, function(...) attr(logLik(...), 'df'))) %>%
+  #Sort the models so that we can find models that replicate the data well.
+  #For this models data_fit should be approximately 100.
+  arrange(desc(data_fit), complexity)
+```
+
+
+### TOP TEN 
+```{r hit list for circular teacher, echo=FALSE}
+fitted_models[,-2] %>% mutate(complexity = num(complexity, digits=2)) %>% slice(1:5)
+```
+
+
+<!-- ### SELECTED MODEL -->
+```{r tuned candidate for circular teacher, echo=FALSE, eval=FALSE, include=FALSE}
+selected_model <- gam(sofa_circ ~ s(bili, k = 100), data=test_data)
+
+summary(selected_model)
+```
+
+
+\newpage
+## SEARCH: Non-Circular Teacher
+
+```{r feature list for search based on corr with non-circular teacher, include=FALSE}
+feature_list <- 
+  corr_matrix[order(abs(corr_matrix[,"DNN wo bili"]), decreasing=TRUE),][1:5,] %>%
+  rownames(.) %>% 
+  paste0("s(", .,")")
+```
+
+```{r liver_model_search for non-circular teacher, cache=TRUE, echo=FALSE, include=FALSE}
+fitted_models <-
+  #generate the power set of feature_list, and remove the void set 
+  powerSet(feature_list)[-(2^length(feature_list))] %>%
+  #build the symbolic model description  
+  sapply(., function(...) glue("sofa_nocirc~{glue_collapse(..., sep='+')}")) %>%
+  #fit the models to data, and extract key statistics
+  tibble(formula_str = .,
+         models      = lapply(X = .,
+                              FUN  = function(m_str,...) bam(as.formula(m_str), ...),
+                              data = test_data),
+         data_fit    = floor(sapply(models, function(m) summary(m)$dev.expl) * 100),
+         complexity  = sapply(models, function(...) attr(logLik(...), 'df'))) %>%
+  #Sort the models so that we can find models that replicate the data well.
+  #For this models data_fit should be approximately 100.
+  arrange(desc(data_fit), complexity)
+```
+
+
+### TOP TEN 
+```{r hit list for non-cirular teacher, echo=FALSE}
+fitted_models[,-2] %>% mutate(complexity = num(complexity, digits=2)) %>% slice(1:5)
+```
+
+
+<!-- ### SELECTED MODEL -->
+```{r tuned candidate for non-circular teacher, echo=FALSE, eval=FALSE, include=FALSE}
+selected_model <- gam(sofa_nocirc ~ s(bili, k = 100), data=test_data)
+
+summary(selected_model)
+```
+
+
+```{r liver_distill_fig3, echo=FALSE, fig.align="center", fig.height=4.5, fig.width=4.5, warning=FALSE, include=FALSE, eval=FALSE}
+jump_bili <- function(x) (x > 12) + (x > 6) + (x > 2) + (x > 1.2) + 0
+
+plot(selected_model, 
+     se    = FALSE, 
+     #rug   = TRUE, 
+     xlim  = c(0,15), 
+     ylim  = c(0,4),
+     main = "",
+     ylab  = "feature shape", 
+     xlab = "bilirubin",
+     shift = coef(selected_model)[1])
+rug(unique(test_data$bili))
+curve(jump_bili, from = 0, to = 15, n = 1001, add = TRUE, col = "blue", lty="dashed")
+abline(v = c(1.2, 2, 6, 12), col = "blue", lty="dotted")
+curve(jump_bili, from = 0, to = 15, n = 1001, add = TRUE, col = "blue", lty="dashed")
+abline(v = c(1.2, 2, 6, 12), col = "blue", lty="dotted")
+legend(legend = c("Theoretical", "Estimated"), 
+       col    = c("blue", "black"),
+       lty    = c("dashed", "solid"),
+       bty    = "o",
+       bg     = "white",
+       x      = "topleft")
+```
